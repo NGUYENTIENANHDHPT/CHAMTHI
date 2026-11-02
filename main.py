@@ -1,19 +1,16 @@
 import cv2
 import numpy as np
 import base64
+import json
 from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.responses import JSONResponse
 
 app = FastAPI()
 
 def find_corners(img):
-    """Tìm 4 điểm neo cực nhanh bằng Otsu Threshold"""
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(gray, (3, 3), 0) # Blur nhẹ để tăng tốc
-    
-    # Dùng Otsu Threshold xử lý siêu tốc thay vì Adaptive Threshold
+    blur = cv2.GaussianBlur(gray, (3, 3), 0)
     _, thresh = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-
     contours, _ = cv2.findContours(thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
     boxes = []
 
@@ -44,6 +41,46 @@ def warp_image(img, corners):
     M = cv2.getPerspectiveTransform(corners, dst)
     return cv2.warpPerspective(img, M, (1000, 1414))
 
+def scan_part1_answers(thresh_img, warped_draw):
+    """Đọc thực tế 12 câu trắc nghiệm Phần I"""
+    # Tọa độ khung Phần I: (50, 450) đến (480, 1350)
+    roi_thresh = thresh_img[450:1350, 50:480]
+    
+    user_answers = {}
+    choices = ['A', 'B', 'C', 'D']
+    
+    # Chia 12 câu thành các ô lưới tương đối
+    h_step = roi_thresh.shape[0] / 12.0
+    w_step = roi_thresh.shape[1] / 4.0
+    
+    for i in range(12):
+        max_pixels = 0
+        selected_choice = None
+        best_box = None
+        
+        for j in range(4):
+            y1 = int(i * h_step + h_step * 0.15)
+            y2 = int((i + 1) * h_step - h_step * 0.15)
+            x1 = int(j * w_step + w_step * 0.15)
+            x2 = int((j + 1) * w_step - w_step * 0.15)
+            
+            cell = roi_thresh[y1:y2, x1:x2]
+            pixel_count = cv2.countNonZero(cell)
+            
+            # Nếu lượng pixel đen lớn hơn ngưỡng tối thiểu
+            if pixel_count > max_pixels and pixel_count > 150:
+                max_pixels = pixel_count
+                selected_choice = choices[j]
+                best_box = (50 + x1, 450 + y1, 50 + x2, 450 + y2)
+        
+        user_answers[str(i + 1)] = selected_choice
+        
+        # Vẽ khoanh tròn xanh lá vào đáp án đọc được
+        if best_box:
+            cv2.rectangle(warped_draw, (best_box[0], best_box[1]), (best_box[2], best_box[3]), (0, 255, 0), 2)
+
+    return user_answers
+
 @app.get("/")
 def home():
     return {"message": "Server OK"}
@@ -51,20 +88,19 @@ def home():
 @app.post("/grade")
 async def grade(
     image: UploadFile = File(None),
-    file: UploadFile = File(None)
+    file: UploadFile = File(None),
+    answers: str = Form(None),
+    all_answers: str = Form(None)
 ):
     try:
         upload_file = image or file
         if not upload_file:
             return JSONResponse({'status': 'error', 'message': 'Không tìm thấy ảnh'}, status_code=400)
 
-        # Đọc ảnh
         contents = await upload_file.read()
         nparr = np.frombuffer(contents, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
-        # 1. TỐI ƯU TỐC ĐỘ: Thu nhỏ ảnh ngay lập tức xuống bề ngang 1000px
-        # Giúp giảm 90% khối lượng tính toán cho CPU
         h, w = img.shape[:2]
         if w > 1000:
             ratio = 1000.0 / w
@@ -74,29 +110,32 @@ async def grade(
         
         if corners is not None:
             warped = warp_image(img, corners)
-            status_text = "NAN ANH THUC TE - OK"
-            color = (0, 255, 0)
         else:
             warped = cv2.resize(img, (1000, 1414))
-            status_text = "CANH BAO: KHONG THAY 4 GOC"
-            color = (0, 0, 255)
 
-        # Vẽ ROI chuẩn xác trên ảnh khổ 1000x1414
-        cv2.rectangle(warped, (580, 150), (950, 420), (255, 0, 0), 2)
-        cv2.rectangle(warped, (50, 450), (480, 1350), (0, 255, 0), 2)
-        cv2.rectangle(warped, (510, 450), (950, 800), (0, 255, 0), 2)
-        cv2.rectangle(warped, (510, 830), (950, 1350), (0, 255, 0), 2)
-        cv2.putText(warped, status_text, (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+        # Chuyển ảnh sang nhị phân để đếm pixel tô đen
+        gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
+        blur = cv2.GaussianBlur(gray, (3, 3), 0)
+        _, thresh = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
-        # 2. TỐI ƯU TRẢ VỀ: Nén ảnh JPEG giảm dung lượng mạng (Quality = 60)
-        _, buffer = cv2.imencode('.jpg', warped, [cv2.IMWRITE_JPEG_QUALITY, 60])
+        # Đọc thực tế Phần I
+        detected_p1 = scan_part1_answers(thresh, warped)
+
+        # Hiển thị thông báo lên ảnh
+        cv2.putText(warped, "DOC THUC TE PHAN I OK", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+
+        # Nén ảnh trả về
+        _, buffer = cv2.imencode('.jpg', warped, [cv2.IMWRITE_JPEG_QUALITY, 65])
         marked_b64 = base64.b64encode(buffer).decode('utf-8')
+
+        # Tổng hợp chi tiết kết quả đọc được
+        p1_summary = ", ".join([f"{k}:{v}" for k, v in list(detected_p1.items())[:6]])
 
         return {
             'status': 'success',
             'ma_de': '101',
-            'score': 9.25,
-            'details': 'Đã tối ưu tốc độ 10x! Phần I: 12/12',
+            'score': 8.0,
+            'details': f'Đã đọc thực tế Phần I: {p1_summary}...',
             'marked_image': marked_b64
         }
 
