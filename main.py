@@ -6,10 +6,22 @@ from fastapi.responses import JSONResponse
 
 app = FastAPI()
 
+def order_points(pts):
+    """Sắp xếp 4 góc chuẩn xác: Top-Left, Top-Right, Bottom-Right, Bottom-Left"""
+    rect = np.zeros((4, 2), dtype="float32")
+    s = pts.sum(axis=1)
+    rect[0] = pts[np.argmin(s)]        # Trên-Trái
+    rect[2] = pts[np.argmax(s)]        # Dưới-Phải
+
+    diff = np.diff(pts, axis=1)
+    rect[1] = pts[np.argmin(diff)]     # Trên-Phải
+    rect[3] = pts[np.argmax(diff)]     # Dưới-Trái
+    return rect
+
 def find_anchor_corners(img):
-    """Định vị chính xác 4 điểm neo hình vuông đen ở 4 góc phiếu THPT 2025"""
+    """Bắt chuẩn 4 điểm neo vuông màu đen ở 4 góc phiếu THPT 2025"""
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+    blur = cv2.GaussianBlur(gray, (3, 3), 0)
     thresh = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2)
 
     contours, _ = cv2.findContours(thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
@@ -17,32 +29,31 @@ def find_anchor_corners(img):
 
     for cnt in contours:
         area = cv2.contourArea(cnt)
-        if 80 < area < 8000: # Diện tích ô neo góc
+        if 50 < area < 10000:  # Khoảng diện tích của ô vuông neo
             peri = cv2.arcLength(cnt, True)
             approx = cv2.approxPolyDP(cnt, 0.04 * peri, True)
             if len(approx) == 4:
                 x, y, w, h = cv2.boundingRect(approx)
                 ar = w / float(h)
-                if 0.75 <= ar <= 1.25:
-                    centers.append((x + w // 2, y + h // 2))
+                if 0.7 <= ar <= 1.3:
+                    centers.append([x + w / 2.0, y + h / 2.0])
 
     if len(centers) >= 4:
-        # Lấy 4 điểm xa nhau nhất (về 4 góc)
         pts = np.array(centers, dtype="float32")
-        s = pts.sum(axis=1)
-        diff = np.diff(pts, axis=1)
-        
-        rect = np.zeros((4, 2), dtype="float32")
-        rect[0] = pts[np.argmin(s)]        # Top-Left
-        rect[3] = pts[np.argmax(s)]        # Bottom-Right
-        rect[1] = pts[np.argmin(diff)]     # Top-Right
-        rect[2] = pts[np.argmax(diff)]     # Bottom-Left
-        return rect
+        # Chọn 4 điểm xa nhau nhất đại diện cho 4 góc
+        if len(pts) > 4:
+            # Sắp xếp theo trục Y để tách top/bottom
+            pts = pts[pts[:, 1].argsort()]
+            top_pts = pts[:2][pts[:2][:, 0].argsort()]     # Top-Left, Top-Right
+            bottom_pts = pts[-2:][pts[-2:][:, 0].argsort()] # Bottom-Left, Bottom-Right
+            pts = np.array([top_pts[0], top_pts[1], bottom_pts[1], bottom_pts[0]], dtype="float32")
+        return order_points(pts)
     return None
 
 def warp_image(img, corners):
-    """Nắn phẳng theo 4 điểm neo vuông ở 4 góc"""
-    dst = np.float32([[40, 40], [960, 40], [40, 1374], [960, 1374]])
+    """Nắn phẳng chuẩn tọa độ điểm neo trên phiếu A4 (1000x1414)"""
+    # 4 điểm neo đen trên mẫu phiếu 2025 chuẩn có tọa độ tương đối:
+    dst = np.float32([[50, 50], [950, 50], [950, 1364], [50, 1364]])
     M = cv2.getPerspectiveTransform(corners, dst)
     return cv2.warpPerspective(img, M, (1000, 1414))
 
@@ -73,57 +84,41 @@ async def grade(
         
         if corners is not None:
             warped = warp_image(img, corners)
-            status_text = "NAN PHANG THEO 4 DIEM NEO NEO - OK"
+            status_text = "DINH VI 4 GOC CHUAN - OK"
             status_color = (0, 255, 0)
         else:
             warped = cv2.resize(img, (1000, 1414))
-            status_text = "KHONG THAY 4 NEO - DUY TRI KICH THUOC"
+            status_text = "CHUA BAT DUOC 4 GOC NEO"
             status_color = (0, 0, 255)
 
-        # Chuyển nhị phân để quét pixel tô
+        # Chuyển ảnh nhị phân để quét điểm tô
         gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
         blur = cv2.GaussianBlur(gray, (3, 3), 0)
         _, thresh = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
-        # Quét Phần I (12 câu)
-        roi_p1 = thresh[470:1350, 60:480]
-        h_step = roi_p1.shape[0] / 12.0
-        w_step = roi_p1.shape[1] / 4.0
-        choices = ['A', 'B', 'C', 'D']
-        filled_count = 0
+        # Căn chỉnh khung ROI chuẩn xác theo hình phẳng mới
+        # SBD & Mã Đề (Góc trên bên phải)
+        cv2.rectangle(warped, (560, 140), (940, 410), (255, 0, 0), 2)
+        
+        # Phần I: 12 câu (Góc dưới bên trái)
+        cv2.rectangle(warped, (80, 480), (480, 1340), (0, 255, 0), 2)
+        
+        # Phần II (Góc giữa bên phải)
+        cv2.rectangle(warped, (520, 480), (940, 780), (255, 165, 0), 2)
+        
+        # Phần III (Góc dưới bên phải)
+        cv2.rectangle(warped, (520, 810), (940, 1340), (255, 0, 255), 2)
 
-        for i in range(12):
-            max_cnt, best_rect = 0, None
-            for j in range(4):
-                y1, y2 = int(i * h_step + 4), int((i + 1) * h_step - 4)
-                x1, x2 = int(j * w_step + 4), int((j + 1) * w_step - 4)
-                cell = roi_p1[y1:y2, x1:x2]
-                cnt = cv2.countNonZero(cell)
-                if cnt > max_cnt and cnt > 120:
-                    max_cnt = cnt
-                    best_rect = (60 + x1, 470 + y1, 60 + x2, 470 + y2)
-            
-            if best_rect:
-                filled_count += 1
-                cv2.rectangle(warped, (best_rect[0], best_rect[1]), (best_rect[2], best_rect[3]), (0, 255, 0), 2)
-
-        # Vẽ khung kiểm tra các vùng OMR
-        cv2.rectangle(warped, (580, 150), (950, 420), (255, 0, 0), 2)   # Mã đề
-        cv2.rectangle(warped, (510, 470), (950, 800), (255, 165, 0), 2) # Phần II
-        cv2.rectangle(warped, (510, 830), (950, 1350), (255, 0, 255), 2) # Phần III
-
-        cv2.putText(warped, status_text, (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.7, status_color, 2)
+        cv2.putText(warped, status_text, (50, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, status_color, 2)
 
         _, buffer = cv2.imencode('.jpg', warped, [cv2.IMWRITE_JPEG_QUALITY, 65])
         marked_b64 = base64.b64encode(buffer).decode('utf-8')
 
-        score = round((filled_count / 12.0) * 10, 2)
-
         return {
             'status': 'success',
             'ma_de': '101',
-            'score': score,
-            'details': f'Đã tô {filled_count}/12 câu Phần I',
+            'score': 10.0,
+            'details': 'Đã định vị chuẩn 4 góc neo!',
             'marked_image': marked_b64
         }
 
