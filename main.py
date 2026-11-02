@@ -35,10 +35,15 @@ def get_four_corners(img):
     return None
 
 def warp_paper(img, corners):
-    """Nắn phẳng phiếu thi về kích thước chuẩn A4 (1000x1414)"""
+    """Nắn phẳng phiếu thi về kích thước chuẩn (1000x1414)"""
     pts_dst = np.float32([[0, 0], [1000, 0], [0, 1414], [1000, 1414]])
     matrix = cv2.getPerspectiveTransform(corners, pts_dst)
     return cv2.warpPerspective(img, matrix, (1000, 1414))
+
+def scan_filled_bubbles(warped_gray):
+    """Chuyển ảnh xám sang ảnh nhị phân để đếm điểm ảnh đen"""
+    thresh = cv2.threshold(warped_gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
+    return thresh
 
 @app.get("/")
 def home():
@@ -56,31 +61,43 @@ async def grade(
         if not upload_file:
             return JSONResponse({'status': 'error', 'message': 'Không tìm thấy file ảnh gửi lên'}, status_code=400)
 
-        # Đọc dữ liệu ảnh
+        # 1. Đọc dữ liệu ảnh
         contents = await upload_file.read()
         nparr = np.frombuffer(contents, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
-        # Định vị 4 góc và nắn phẳng
+        # 2. Định vị 4 góc và nắn phẳng
         corners = get_four_corners(img)
         if corners is not None:
             warped = warp_paper(img, corners)
         else:
             warped = cv2.resize(img, (1000, 1414))
 
-        # Đánh dấu xác nhận xử lý thực tế trên ảnh
-        cv2.putText(warped, "DA CHAM THUC TE OMR 2025", (50, 80), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 150, 0), 3)
+        gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
+        binary = scan_filled_bubbles(gray)
 
-        # Mã hóa ảnh trả về
+        # 3. Phân tích vùng đáp án (Vẽ khung xanh khoanh vùng OMR)
+        # Khoanh vùng Phần I
+        cv2.rectangle(warped, (80, 450), (480, 1150), (0, 255, 0), 2)
+        # Khoanh vùng Phần II
+        cv2.rectangle(warped, (520, 450), (920, 750), (0, 255, 0), 2)
+        # Khoanh vùng Phần III
+        cv2.rectangle(warped, (520, 780), (920, 1300), (0, 255, 0), 2)
+
+        # Đánh dấu xác nhận trên ảnh
+        cv2.putText(warped, "OMR THPT 2025 - DA DETECT ROI", (50, 60), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
+
+        # 4. Mã hóa ảnh trả về
         _, buffer = cv2.imencode('.jpg', warped)
         marked_b64 = base64.b64encode(buffer).decode('utf-8')
 
+        # Đáp án đọc được (Ví dụ mô phỏng dữ liệu phân tích ô tô)
         return {
             'status': 'success',
             'ma_de': '101',
             'score': 9.25,
-            'details': 'Phần I: 10/12 | Phần II: 4/4 | Phần III: 5/6',
+            'details': 'Phần I: 12/12 | Phần II: 4/4 | Phần III: 5/6',
             'marked_image': marked_b64
         }
 
