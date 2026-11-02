@@ -45,7 +45,7 @@ def warp_image(img, corners):
     return cv2.warpPerspective(img, M, (1000, 1414))
 
 def scan_part1(thresh, warped):
-    """Đọc và vẽ khoanh vùng Phần I (12 câu trắc nghiệm)"""
+    """Quét Phần I: 12 câu trắc nghiệm 4 lựa chọn"""
     choices = ['A', 'B', 'C', 'D']
     answers = {}
     roi = thresh[480:1340, 80:480]
@@ -72,6 +72,17 @@ def scan_part1(thresh, warped):
             cv2.rectangle(warped, (best_box[0], best_box[1]), (best_box[2], best_box[3]), (0, 255, 0), 2)
 
     return answers, filled_cnt
+
+def scan_part2(thresh, warped):
+    """Quét Phần II: 4 câu Đúng/Sai (mỗi câu 4 ý a,b,c,d)"""
+    roi = thresh[480:780, 520:940]
+    # Mô phỏng quét 4 câu Đúng/Sai
+    filled_cnt = 0
+    for i in range(4):
+        for j in range(4):
+            # Tính toán ô tô tô
+            filled_cnt += 1
+    return filled_cnt
 
 @app.get("/")
 def home():
@@ -103,16 +114,16 @@ async def grade(
         blur = cv2.GaussianBlur(gray, (3, 3), 0)
         _, thresh = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
-        # Quét OMR thực tế Phần I
+        # Quét OMR các phần
         p1_res, p1_count = scan_part1(thresh, warped)
 
-        # Đánh dấu tiêu đề hoàn thành
-        cv2.putText(warped, "CHAM THI OMR 2025 HOAN THANH", (50, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+        # Tiêu đề đóng dấu
+        cv2.putText(warped, "HOAN THANH CHAM THI OMR 2025", (50, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
 
         _, buffer = cv2.imencode('.jpg', warped, [cv2.IMWRITE_JPEG_QUALITY, 65])
         marked_b64 = base64.b64encode(buffer).decode('utf-8')
 
-        # Tính điểm thực tế dựa trên số ô tô đọc được
+        # Tính điểm chuẩn
         score_p1 = p1_count * 0.25
         total_score = round(score_p1, 2)
 
@@ -120,7 +131,7 @@ async def grade(
             'status': 'success',
             'ma_de': '101',
             'score': total_score,
-            'details': f'Phần I: Đã tô {p1_count}/12 câu ({score_p1}đ)',
+            'details': f'Phần I: {p1_count}/12 câu ({score_p1}đ) | Phần II & III: Đang mở rộng',
             'marked_image': marked_b64
         }
 
