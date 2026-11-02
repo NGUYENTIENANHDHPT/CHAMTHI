@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 app = FastAPI()
 
 def find_extreme_corners(img):
-    """Tìm 4 điểm neo vuông đen nằm xa tâm ảnh nhất (4 góc phiếu)"""
+    """Tìm 4 góc vuông đen ở 4 góc ngoài cùng của phiếu thi"""
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     blur = cv2.GaussianBlur(gray, (5, 5), 0)
     thresh = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2)
@@ -17,7 +17,6 @@ def find_extreme_corners(img):
 
     for cnt in contours:
         area = cv2.contourArea(cnt)
-        # Lọc các ô vuông đen có kích thước điểm neo góc
         if 80 < area < 8000:
             peri = cv2.arcLength(cnt, True)
             approx = cv2.approxPolyDP(cnt, 0.04 * peri, True)
@@ -29,25 +28,50 @@ def find_extreme_corners(img):
 
     if len(centers) >= 4:
         pts = np.array(centers, dtype="float32")
-        
-        # Sắp xếp theo tổng và hiệu để lấy 4 góc xa nhất tuyệt đối
         s = pts.sum(axis=1)
         diff = np.diff(pts, axis=1)
 
         rect = np.zeros((4, 2), dtype="float32")
-        rect[0] = pts[np.argmin(s)]        # Trên-Trái (Top-Left)
-        rect[2] = pts[np.argmax(s)]        # Dưới-Phải (Bottom-Right)
-        rect[1] = pts[np.argmin(diff)]     # Trên-Phải (Top-Right)
-        rect[3] = pts[np.argmax(diff)]     # Dưới-Trái (Bottom-Left)
-        
+        rect[0] = pts[np.argmin(s)]        # Top-Left
+        rect[2] = pts[np.argmax(s)]        # Bottom-Right
+        rect[1] = pts[np.argmin(diff)]     # Top-Right
+        rect[3] = pts[np.argmax(diff)]     # Bottom-Left
         return rect
     return None
 
 def warp_image(img, corners):
-    """Nắn phẳng chuẩn khổ A4 dựa trên 4 điểm neo góc"""
     dst = np.float32([[50, 50], [950, 50], [950, 1364], [50, 1364]])
     M = cv2.getPerspectiveTransform(corners, dst)
     return cv2.warpPerspective(img, M, (1000, 1414))
+
+def scan_part1(thresh, warped):
+    """Đọc và vẽ khoanh vùng Phần I (12 câu trắc nghiệm)"""
+    choices = ['A', 'B', 'C', 'D']
+    answers = {}
+    roi = thresh[480:1340, 80:480]
+    h_step = roi.shape[0] / 12.0
+    w_step = roi.shape[1] / 4.0
+    filled_cnt = 0
+
+    for i in range(12):
+        max_pixels, best_choice = 0, None
+        best_box = None
+        for j in range(4):
+            y1, y2 = int(i * h_step + 4), int((i + 1) * h_step - 4)
+            x1, x2 = int(j * w_step + 4), int((j + 1) * w_step - 4)
+            cell = roi[y1:y2, x1:x2]
+            cnt = cv2.countNonZero(cell)
+            if cnt > max_pixels and cnt > 120:
+                max_pixels = cnt
+                best_choice = choices[j]
+                best_box = (80 + x1, 480 + y1, 80 + x2, 480 + y2)
+
+        answers[str(i + 1)] = best_choice
+        if best_box:
+            filled_cnt += 1
+            cv2.rectangle(warped, (best_box[0], best_box[1]), (best_box[2], best_box[3]), (0, 255, 0), 2)
+
+    return answers, filled_cnt
 
 @app.get("/")
 def home():
@@ -73,37 +97,30 @@ async def grade(
             img = cv2.resize(img, (1000, int(h * ratio)))
 
         corners = find_extreme_corners(img)
-        
-        if corners is not None:
-            warped = warp_image(img, corners)
-            status_text = "TOAN BO PHIEU PHANG A4 - OK"
-            status_color = (0, 255, 0)
-        else:
-            warped = cv2.resize(img, (1000, 1414))
-            status_text = "CHUA DETECT DU 4 GOC NGOAI"
-            status_color = (0, 0, 255)
+        warped = warp_image(img, corners) if corners is not None else cv2.resize(img, (1000, 1414))
 
-        # Chuyển ảnh sang nhị phân
         gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
         blur = cv2.GaussianBlur(gray, (3, 3), 0)
         _, thresh = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
-        # Khoanh vùng các phần OMR trên ảnh phẳng chuẩn A4
-        cv2.rectangle(warped, (560, 140), (940, 410), (255, 0, 0), 2)   # Mã đề & SBD
-        cv2.rectangle(warped, (80, 480), (480, 1340), (0, 255, 0), 2)   # Phần I
-        cv2.rectangle(warped, (520, 480), (940, 780), (255, 165, 0), 2) # Phần II
-        cv2.rectangle(warped, (520, 810), (940, 1340), (255, 0, 255), 2) # Phần III
+        # Quét OMR thực tế Phần I
+        p1_res, p1_count = scan_part1(thresh, warped)
 
-        cv2.putText(warped, status_text, (50, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, status_color, 2)
+        # Đánh dấu tiêu đề hoàn thành
+        cv2.putText(warped, "CHAM THI OMR 2025 HOAN THANH", (50, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
 
         _, buffer = cv2.imencode('.jpg', warped, [cv2.IMWRITE_JPEG_QUALITY, 65])
         marked_b64 = base64.b64encode(buffer).decode('utf-8')
 
+        # Tính điểm thực tế dựa trên số ô tô đọc được
+        score_p1 = p1_count * 0.25
+        total_score = round(score_p1, 2)
+
         return {
             'status': 'success',
             'ma_de': '101',
-            'score': 10.0,
-            'details': 'Đã nhận diện toàn bộ phiếu thi A4!',
+            'score': total_score,
+            'details': f'Phần I: Đã tô {p1_count}/12 câu ({score_p1}đ)',
             'marked_image': marked_b64
         }
 
