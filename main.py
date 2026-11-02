@@ -6,22 +6,10 @@ from fastapi.responses import JSONResponse
 
 app = FastAPI()
 
-def order_points(pts):
-    """Sắp xếp 4 góc chuẩn xác: Top-Left, Top-Right, Bottom-Right, Bottom-Left"""
-    rect = np.zeros((4, 2), dtype="float32")
-    s = pts.sum(axis=1)
-    rect[0] = pts[np.argmin(s)]        # Trên-Trái
-    rect[2] = pts[np.argmax(s)]        # Dưới-Phải
-
-    diff = np.diff(pts, axis=1)
-    rect[1] = pts[np.argmin(diff)]     # Trên-Phải
-    rect[3] = pts[np.argmax(diff)]     # Dưới-Trái
-    return rect
-
-def find_anchor_corners(img):
-    """Bắt chuẩn 4 điểm neo vuông màu đen ở 4 góc phiếu THPT 2025"""
+def find_extreme_corners(img):
+    """Tìm 4 điểm neo vuông đen nằm xa tâm ảnh nhất (4 góc phiếu)"""
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(gray, (3, 3), 0)
+    blur = cv2.GaussianBlur(gray, (5, 5), 0)
     thresh = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2)
 
     contours, _ = cv2.findContours(thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
@@ -29,30 +17,34 @@ def find_anchor_corners(img):
 
     for cnt in contours:
         area = cv2.contourArea(cnt)
-        if 50 < area < 10000:  # Khoảng diện tích của ô vuông neo
+        # Lọc các ô vuông đen có kích thước điểm neo góc
+        if 80 < area < 8000:
             peri = cv2.arcLength(cnt, True)
             approx = cv2.approxPolyDP(cnt, 0.04 * peri, True)
             if len(approx) == 4:
                 x, y, w, h = cv2.boundingRect(approx)
                 ar = w / float(h)
-                if 0.7 <= ar <= 1.3:
-                    centers.append([x + w / 2.0, y + h / 2.0])
+                if 0.75 <= ar <= 1.25:
+                    centers.append((x + w // 2, y + h // 2))
 
     if len(centers) >= 4:
         pts = np.array(centers, dtype="float32")
-        # Chọn 4 điểm xa nhau nhất đại diện cho 4 góc
-        if len(pts) > 4:
-            # Sắp xếp theo trục Y để tách top/bottom
-            pts = pts[pts[:, 1].argsort()]
-            top_pts = pts[:2][pts[:2][:, 0].argsort()]     # Top-Left, Top-Right
-            bottom_pts = pts[-2:][pts[-2:][:, 0].argsort()] # Bottom-Left, Bottom-Right
-            pts = np.array([top_pts[0], top_pts[1], bottom_pts[1], bottom_pts[0]], dtype="float32")
-        return order_points(pts)
+        
+        # Sắp xếp theo tổng và hiệu để lấy 4 góc xa nhất tuyệt đối
+        s = pts.sum(axis=1)
+        diff = np.diff(pts, axis=1)
+
+        rect = np.zeros((4, 2), dtype="float32")
+        rect[0] = pts[np.argmin(s)]        # Trên-Trái (Top-Left)
+        rect[2] = pts[np.argmax(s)]        # Dưới-Phải (Bottom-Right)
+        rect[1] = pts[np.argmin(diff)]     # Trên-Phải (Top-Right)
+        rect[3] = pts[np.argmax(diff)]     # Dưới-Trái (Bottom-Left)
+        
+        return rect
     return None
 
 def warp_image(img, corners):
-    """Nắn phẳng chuẩn tọa độ điểm neo trên phiếu A4 (1000x1414)"""
-    # 4 điểm neo đen trên mẫu phiếu 2025 chuẩn có tọa độ tương đối:
+    """Nắn phẳng chuẩn khổ A4 dựa trên 4 điểm neo góc"""
     dst = np.float32([[50, 50], [950, 50], [950, 1364], [50, 1364]])
     M = cv2.getPerspectiveTransform(corners, dst)
     return cv2.warpPerspective(img, M, (1000, 1414))
@@ -80,34 +72,27 @@ async def grade(
             ratio = 1000.0 / w
             img = cv2.resize(img, (1000, int(h * ratio)))
 
-        corners = find_anchor_corners(img)
+        corners = find_extreme_corners(img)
         
         if corners is not None:
             warped = warp_image(img, corners)
-            status_text = "DINH VI 4 GOC CHUAN - OK"
+            status_text = "TOAN BO PHIEU PHANG A4 - OK"
             status_color = (0, 255, 0)
         else:
             warped = cv2.resize(img, (1000, 1414))
-            status_text = "CHUA BAT DUOC 4 GOC NEO"
+            status_text = "CHUA DETECT DU 4 GOC NGOAI"
             status_color = (0, 0, 255)
 
-        # Chuyển ảnh nhị phân để quét điểm tô
+        # Chuyển ảnh sang nhị phân
         gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
         blur = cv2.GaussianBlur(gray, (3, 3), 0)
         _, thresh = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
-        # Căn chỉnh khung ROI chuẩn xác theo hình phẳng mới
-        # SBD & Mã Đề (Góc trên bên phải)
-        cv2.rectangle(warped, (560, 140), (940, 410), (255, 0, 0), 2)
-        
-        # Phần I: 12 câu (Góc dưới bên trái)
-        cv2.rectangle(warped, (80, 480), (480, 1340), (0, 255, 0), 2)
-        
-        # Phần II (Góc giữa bên phải)
-        cv2.rectangle(warped, (520, 480), (940, 780), (255, 165, 0), 2)
-        
-        # Phần III (Góc dưới bên phải)
-        cv2.rectangle(warped, (520, 810), (940, 1340), (255, 0, 255), 2)
+        # Khoanh vùng các phần OMR trên ảnh phẳng chuẩn A4
+        cv2.rectangle(warped, (560, 140), (940, 410), (255, 0, 0), 2)   # Mã đề & SBD
+        cv2.rectangle(warped, (80, 480), (480, 1340), (0, 255, 0), 2)   # Phần I
+        cv2.rectangle(warped, (520, 480), (940, 780), (255, 165, 0), 2) # Phần II
+        cv2.rectangle(warped, (520, 810), (940, 1340), (255, 0, 255), 2) # Phần III
 
         cv2.putText(warped, status_text, (50, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, status_color, 2)
 
@@ -118,7 +103,7 @@ async def grade(
             'status': 'success',
             'ma_de': '101',
             'score': 10.0,
-            'details': 'Đã định vị chuẩn 4 góc neo!',
+            'details': 'Đã nhận diện toàn bộ phiếu thi A4!',
             'marked_image': marked_b64
         }
 
